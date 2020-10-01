@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2020-10-01'
+Description: BiNu Test Stack
+Resources:
+    AWSEC2Instance:
+        Type: AWS::EC2::Instance
+        Properties: 
+            AvailabilityZone: af-south-1a
+            BlockDeviceMappings: 
+                - DeviceName: /dev/sda
+                Ebs: 
+                    DeleteOnTermination: True
+                    Encrypted: True
+                    KmsKeyId: my-web01-ebs-kms-key
+                    VolumeSize: 20
+                    VolumeType: gp2
+            DisableApiTermination: True
+            EbsOptimized: False
+            ImageId: ami-00a205cb8e06c3c4e
+            InstanceInitiatedShutdownBehavior: stop
+            InstanceType: t2.micro
+            KeyName: testing-web01-key.pem
+            Monitoring: True
+            Tags: 
+                - Key: Name
+                Value: TestingWeb01Instance
+            Tenancy: default
+            UserData:
+                !Base64 |
+                #!/bin/bash
+                yum -y update httpd
+                systemctl enable httpd.service
+                systemctl start httpd.service
+                touch /var/www/html/index.html
+                echo "<h1>Welcome to my website</h1>" >> /var/www/html/index.html
+                sudo yum install -y aws-kinesis-agent
+                sudo echo "{
+                    "cloudwatch.emitMetrics": true,
+                    "kinesis.endpoint": "",
+                    "firehose.endpoint": "",
+                
+                    "flows": [
+                    {
+                        "filePattern": "/var/log/httpd/*",
+                        "kinesisStream": "from-ec2-to-analytics-delivery-stream",
+                        "partitionKeyOption": "RANDOM"
+                    },
+                    {
+                        "filePattern": "/tmp/app.log*",
+                        "deliveryStream": "yourdeliverystream"
+                    }
+                    ]
+                }" > /etc/aws-kinesis/agent.json
+    AWSKinesisFirehoseDeliveryStreamSource:
+        Type: AWS::KinesisFirehose::DeliveryStream
+        Properties: 
+            DeliveryStreamName: from-ec2-to-analytics-delivery-stream-source
+            DeliveryStreamType: DirectPut
+    AWSKinesisAnalyticsApplication:
+        Type: AWS::KinesisAnalytics::Application
+        Properties: 
+            ApplicationCode: String
+            ApplicationDescription: String
+            ApplicationName: ec2-logs-kinesis-analyzer
+            Inputs: 
+                - KinesisFirehoseInput: 
+                    ResourceARN: !GetAtt AWSKinesisFirehoseDeliveryStreamSource.Arn
+    DependsOn: AWSKinesisFirehoseDeliveryStreamSource
+    AWSElasticsearchDomain:
+        Type: AWS::Elasticsearch::Domain
+        Properties: 
+            DomainName: es-logging-domain
+            EBSOptions: 
+                EBSEnabled: True
+                Iops: 0
+                VolumeSize: 100
+                VolumeType: gp2
+            ElasticsearchClusterConfig: 
+                DedicatedMasterCount: 2
+                DedicatedMasterEnabled: True
+                DedicatedMasterType: m3.medium.elasticsearch
+                InstanceCount: 2
+                InstanceType: m3.medium.elasticsearch
+            ElasticsearchVersion: 6.5
+            Tags:
+              - Key: Name
+                Value: AWSElasticsearchDomain
+    AWSKinesisFirehoseDeliveryStreamDestination:
+        Type: AWS::KinesisFirehose::DeliveryStream
+        Properties: 
+            DeliveryStreamName: from-kinesis-analytics-application-to-es-domain
+            DeliveryStreamType: KinesisStreamAsSource
+            KinesisStreamSourceConfiguration: 
+                KinesisStreamARN: !GetAtt AWSKinesisAnalyticsApplication.Arn
+            ElasticsearchDestinationConfiguration: 
+                  DomainARN: !GetAtt AWSElasticsearchDomain.Arn
+                  IndexName: web-logging-index
+                  IndexRotationPeriod: OneWeek
+        
